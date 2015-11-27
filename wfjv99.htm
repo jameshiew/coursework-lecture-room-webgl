@@ -1,0 +1,961 @@
+<html>
+<head>
+    <title>Sandbox</title>
+    <meta charset="UTF-8"/>
+    <script type="text/javascript" src="gl-matrix.js"></script>
+    <script id="vertex-shader" type="x-shader/x-vertex">
+    // for each vertex
+    attribute vec3 vertexPosition_a;
+    attribute vec3 vertexNormal_a;
+
+    // one of
+    attribute vec4 vertexColour_a;
+    attribute vec2 textureCoordinates_a;
+
+    uniform mat4 modelMatrix_u;
+    uniform mat4 viewMatrix_u;
+    uniform mat4 projectionMatrix_u;
+    uniform mat3 normalMatrix_u;
+
+    // direction of light
+    uniform vec3 lightingDirection_u;
+
+    // light colours
+    uniform vec3 ambientColour_u;
+    uniform vec3 directionalColour_u;
+
+    varying vec3 lightWeighting_v;
+
+    // one of
+    varying vec4 colour_v;
+    varying vec2 texture_v;
+
+    void main(void) {
+        gl_Position =
+            projectionMatrix_u *
+            viewMatrix_u *
+            modelMatrix_u *
+            vec4(vertexPosition_a, 1.0);
+
+        // one of
+        colour_v = vertexColour_a;
+        texture_v = textureCoordinates_a;
+
+        // lighting
+        vec3 transformedNormal = normalMatrix_u * vertexNormal_a;
+        float directionalLightWeighting = max(
+            dot(
+                transformedNormal,
+                lightingDirection_u
+            ),
+            0.0
+        );
+        lightWeighting_v = ambientColour_u + directionalColour_u + directionalLightWeighting;
+    }
+    </script>
+
+    <!-- rasterizer acts here, interpolating vertex
+    varyings to fragment varyings -->
+
+    <script id="fragment-shader" type="x-shader/x-fragment">
+    precision mediump float;
+
+    varying vec4 colour_v;
+    varying vec2 texture_v;
+    varying vec3 lightWeighting_v;
+
+    uniform sampler2D sampler_u;
+
+    void main(void) {
+        // gl_FragColor = vec4(1.0, 0.3, 1.0, 1.0);
+        // gl_FragColor = colour_v;
+        vec4 textureColour = texture2D(sampler_u, vec2(texture_v.s, texture_v.t));
+        // gl_FragColor = texture2D(sampler_u, vec2(texture_v.s, texture_v.t));
+        gl_FragColor = vec4(textureColour.rgb * lightWeighting_v, 1.0);
+    }
+    </script>
+
+    <script type="text/javascript">
+        "use strict";
+        // IMPORTANT:
+        // three main coordinate systems:
+        // model coordinates, world coordinates, eye coordinates
+        // WebGL co-ordinate space is from (1, 1, 1) to (-1, -1, -1) I think?
+        // right handed co-ordinate system with Z axis pointing out of the
+        // screen towards you, Y axis pointing upwards
+        //
+        // rotation is always done about the origin
+
+        const GL = WebGLRenderingContext;
+        const PI = 3.14159265359;
+
+        /**
+         * Get the WebGLRenderingContext for the canvas on this page.
+         * @return {WebGLRenderingContext}
+         **/
+        function getWebGLRenderingContext() {
+            // grab relevant elements from document
+            /** @type HTMLCanvasElement */ var canvasElement =
+                    document.getElementById("canvas");
+
+            // get a WebGL context to work with
+            /** @type WebGLRenderingContext */ var gl =
+                    canvasElement.getContext("webgl");
+            if (gl === null) {
+                throw "Could not get a WebGL context";
+            }
+            return gl;
+        }
+
+        /**
+         * Compile a shader.
+         * @param {WebGLRenderingContext} gl - the context with which this
+         * shader will be compiled?
+         * @param {number} type - The type of shader (GL.VERTEX_SHADER or
+         * GL.FRAGMENT_SHADER)
+         * @param {string} source - The source code of the shader.
+         **/
+        function compileShader(gl, type, source) {
+            var shaderHandle = gl.createShader(type);
+            gl.shaderSource(shaderHandle, source);
+            gl.compileShader(shaderHandle);
+            if (gl.getShaderParameter(shaderHandle, GL.COMPILE_STATUS)) {
+                return shaderHandle;
+            } else {
+                throw gl.getShaderInfoLog(shaderHandle);
+            }
+        }
+
+        /**
+         * Create a program object linking a vertex shader handle and fragment
+         * shader handle (that have been pre-compiled).
+         *
+         * @param {WebGLRenderingContext} gl
+         * @param {WebGLShader} vertexShaderHandle
+         * @param {WebGLShader} fragmentShaderHandle
+         **/
+        function linkProgram(gl, vertexShaderHandle, fragmentShaderHandle) {
+            // link shaders with program
+            /** @type WebGLProgram */ var program = gl.createProgram();
+            gl.attachShader(program, vertexShaderHandle);
+            gl.attachShader(program, fragmentShaderHandle);
+            gl.linkProgram(program);
+            if (gl.getProgramParameter(program, GL.LINK_STATUS)) {
+                return program;
+            } else {
+                throw gl.getProgramInfoLog(program);
+            }
+        }
+
+        /**
+         * Load a texture onto the GPU.
+         *
+         * Set the handle as `texture` attribute on the image.
+         *
+         * @param {WebGLRenderingContext} gl
+         * @param {HTMLImageElement} image
+         **/
+        function loadTexture(gl, image) {
+            var textureHandle = gl.createTexture();
+            gl.bindTexture(
+                    GL.TEXTURE_2D,
+                    textureHandle
+            );
+            gl.texImage2D(
+                    GL.TEXTURE_2D,  // kind of image being used
+                    0,  // level of detail
+                    GL.RGBA,  // format we want image to be stored on GPU
+                    GL.RGBA,
+                    GL.UNSIGNED_BYTE,  // size of each channel (each of r g b and a)
+                    image  // the image itself
+            );
+            // scaling parameters for the texture
+            gl.texParameteri(
+                    GL.TEXTURE_2D,
+                    GL.TEXTURE_MAG_FILTER,
+                    GL.NEAREST
+            );
+            gl.texParameteri(
+                    GL.TEXTURE_2D,
+                    GL.TEXTURE_MIN_FILTER,
+                    GL.NEAREST
+            );
+            gl.bindTexture(GL.TEXTURE_2D, null);
+            image.textureHandle = textureHandle;
+        }
+
+        function main() {
+            var gl = getWebGLRenderingContext();
+            // compile shaders
+            /** @type HTMLScriptElement */ var vertexShaderElement =
+                    document.getElementById("vertex-shader");
+            /** @type HTMLScriptElement */ var fragmentShaderElement =
+                    document.getElementById("fragment-shader");
+            var vertexShaderHandle = compileShader(
+                    gl,
+                    GL.VERTEX_SHADER,
+                    vertexShaderElement.text
+            );
+            var fragmentShaderHandle = compileShader(
+                    gl,
+                    GL.FRAGMENT_SHADER,
+                    fragmentShaderElement.text
+            );
+            var program = linkProgram(
+                    gl,
+                    vertexShaderHandle,
+                    fragmentShaderHandle
+            );
+            gl.useProgram(program);
+
+            // how to transform coordinates
+            // model coords -> world coords
+            /** @type WebGLUniformLocation */ var modelMatrix_u =
+                    gl.getUniformLocation(program, "modelMatrix_u");
+            // world coords -> eye coords
+            /** @type WebGLUniformLocation */ var viewMatrix_u =
+                    gl.getUniformLocation(program, "viewMatrix_u");
+            // eye coords -> projection coords
+            /** @type WebGLUniformLocation */ var projectionMatrix_u =
+                    gl.getUniformLocation(program, "projectionMatrix_u");
+            /** @type WebGLUniformLocation */ var normalMatrix_u =
+                    gl.getUniformLocation(program, "normalMatrix_u");
+            // homogeneous coordinates?
+
+            // initialise all the matrices
+            var modelMatrix = mat4.create();
+            var viewMatrix = mat4.create();
+            var projectionMatrix = mat4.create();
+
+            function resetModelMatrix() {
+                modelMatrix = mat4.create();
+            }
+            resetModelMatrix();
+
+            function resetViewMatrix() {
+                viewMatrix = mat4.create();
+            }
+            resetViewMatrix();
+
+            function resetProjectionMatrix() {
+                projectionMatrix = mat4.create();
+            }
+            resetProjectionMatrix();
+
+            function updateMatrices() {
+                gl.uniformMatrix4fv(
+                        modelMatrix_u,
+                        false,
+                        modelMatrix
+                );
+                gl.uniformMatrix4fv(
+                        viewMatrix_u,
+                        false,
+                        viewMatrix
+                );
+                gl.uniformMatrix4fv(
+                        projectionMatrix_u,
+                        false,
+                        projectionMatrix
+                );
+                // normal matrix dependent on other matrices
+                var normalMatrix = mat3.create();
+                var modelViewMatrix = mat4.create();
+                modelViewMatrix = mat4.multiply(
+                        modelViewMatrix,
+                        modelMatrix,
+                        viewMatrix
+                );
+                // mat4.toInverseMat3??
+                mat3.fromMat4(normalMatrix, modelViewMatrix);
+                mat3.invert(normalMatrix, normalMatrix);
+                mat3.transpose(normalMatrix, normalMatrix);
+                gl.uniformMatrix3fv(
+                    normalMatrix_u,
+                    false,
+                    normalMatrix
+                );
+            }
+
+            function viewOne() {
+                mat4.lookAt(
+                        viewMatrix,
+                        vec3.fromValues(-10.0, 6.0, 10.0),
+                        vec3.fromValues(0.0, 0.0, 0.0),
+                        vec3.fromValues(0.0, 1.0, 0.0)
+                );
+                updateMatrices();
+            }
+
+            function viewTwo() {
+                mat4.lookAt(
+                        viewMatrix,
+                        vec3.fromValues(0.0, 5.0, 10.0),
+                        vec3.fromValues(0.0, 0.0, 0.0),
+                        vec3.fromValues(0.0, 1.0, 0.0)
+                );
+                updateMatrices();
+            }
+
+            function viewThree() {
+                // set the initial eye and perspective
+                // adjust eye height and position
+                mat4.lookAt(
+                        viewMatrix,
+                        vec3.fromValues(-4.0, 4.0, -12.0),
+                        vec3.fromValues(0.0, 0.0, 0.0),
+                        vec3.fromValues(0.0, 1.0, 0.0)
+                );
+                updateMatrices();
+            }
+
+            // all views are perspective
+            mat4.perspective(
+                    projectionMatrix,
+                    PI/4,
+                    gl.drawingBufferWidth/gl.drawingBufferHeight,
+                    0.1,  // NB: cannot be 0.0!!
+                    100.0
+            );
+
+            // default view
+            viewOne();
+
+            // get pointers to vertex shader attributes
+            // don't enableVertexAttribArray if you aren't going to use it...
+            /** @type int */ var vertexPosition_a =
+                    gl.getAttribLocation(program, "vertexPosition_a");
+            if (vertexPosition_a === -1) {
+                throw "Could not get a handle on the position attribute";
+            }
+            gl.enableVertexAttribArray(vertexPosition_a);
+
+            /** @type int */ var vertexNormal_a =
+                    gl.getAttribLocation(program, "vertexNormal_a");
+            if (vertexNormal_a === -1) {
+                throw "Could not get a handle on the normal attribute";
+            }
+            gl.enableVertexAttribArray(vertexNormal_a);
+
+//            /** @type int */ var vertexColour_a =
+//                    gl.getAttribLocation(program, "vertexColour_a");
+//            if (vertexColour_a === -1) {
+//                throw "Could not get a handle on the colour attribute";
+//            }
+//            gl.enableVertexAttribArray(vertexColour_a);
+
+            /** @type int */ var textureCoordinates_a =
+                    gl.getAttribLocation(program, "textureCoordinates_a");
+            if (textureCoordinates_a === -1) {
+                throw "Could not get a handle on the texture attribute";
+            }
+            gl.enableVertexAttribArray(textureCoordinates_a);
+
+            // texturing
+            // only way i could get this to work was by embedding the images
+            // in the page
+            var woodImage = document.getElementById("wood");
+            loadTexture(gl, woodImage);
+
+            var metalImage = document.getElementById("metal");
+            loadTexture(gl, metalImage);
+
+            var floorImage = document.getElementById("floor");
+            loadTexture(gl, floorImage);
+
+            var textureCoordinatesBuffer = gl.createBuffer();
+            gl.bindBuffer(GL.ARRAY_BUFFER, textureCoordinatesBuffer);
+            gl.bufferData(GL.ARRAY_BUFFER, new Float32Array([
+                0.0, 0.0,
+                1.0, 0.0,
+                0.0, 1.0,
+                1.0, 1.0,
+
+                0.0, 0.0,
+                1.0, 0.0,
+                0.0, 1.0,
+                1.0, 1.0,
+
+                0.0, 0.0,
+                1.0, 0.0,
+                0.0, 1.0,
+                1.0, 1.0,
+
+                0.0, 0.0,
+                1.0, 0.0,
+                0.0, 1.0,
+                1.0, 1.0,
+
+                0.0, 0.0,
+                1.0, 0.0,
+                0.0, 1.0,
+                1.0, 1.0,
+
+                0.0, 0.0,
+                1.0, 0.0,
+                0.0, 1.0,
+                1.0, 1.0,
+
+                0.0, 0.0,
+                1.0, 0.0,
+                0.0, 1.0,
+                1.0, 1.0,
+
+                0.0, 0.0,
+                1.0, 0.0,
+                0.0, 1.0,
+                1.0, 1.0,
+
+            ]), GL.STATIC_DRAW);
+            textureCoordinatesBuffer.item_size = 2;
+            textureCoordinatesBuffer.number_of_items = 32;
+            gl.vertexAttribPointer(
+                    textureCoordinates_a,
+                    textureCoordinatesBuffer.item_size,
+                    GL.FLOAT, false, 0, 0
+            );
+
+            // lighting
+            /** @type WebGLUniformLocation */ var normalMatrix_u =
+                gl.getUniformLocation(program, "normalMatrix_u");
+            if (!normalMatrix_u) {
+                throw "normalMatrix_u couldn't get handle";
+            }
+            /** @type WebGLUniformLocation */ var lightingDirection_u =
+                gl.getUniformLocation(program, "lightingDirection_u");
+            if (!lightingDirection_u) {
+                throw "lightingDirection_u couldn't get handle";
+            }
+            /** @type WebGLUniformLocation */ var ambientColour_u =
+                gl.getUniformLocation(program, "ambientColour_u");
+            if (!ambientColour_u) {
+                throw "ambientColour_u couldn't get handle";
+            }
+            /** @type WebGLUniformLocation */ var directionalColour_u =
+                gl.getUniformLocation(program, "directionalColour_u");
+            if (!directionalColour_u) {
+                throw "directionalColour_u couldn't get handle";
+            }
+
+            // colour of lights (arbitrary)
+            gl.uniform3f(
+                ambientColour_u,
+                0.7,
+                0.3,
+                0.4
+            );
+            gl.uniform3f(
+                directionalColour_u,
+                0.3,
+                0.7,
+                0.8
+            );
+            // lighting direction
+            var lightingDirection = vec3.fromValues(1.0, -1.0, 0.0);
+            var normalisedLightingDirection = vec3.create();
+            vec3.normalize(
+                normalisedLightingDirection,
+                lightingDirection
+            );
+            vec3.scale(
+                normalisedLightingDirection,
+                normalisedLightingDirection,
+                -1
+            );
+            console.log("Normalised lighting direction: " + normalisedLightingDirection[0] + "," + normalisedLightingDirection[1] + "," + normalisedLightingDirection[2]);
+            gl.uniform3fv(lightingDirection_u, normalisedLightingDirection);
+            
+            // color buffer
+//            var colorBuffer = gl.createBuffer();
+//            gl.bindBuffer(GL.ARRAY_BUFFER, colorBuffer);
+//            gl.bufferData(GL.ARRAY_BUFFER, new Float32Array([
+//                1.0, 0.0, 0.0, 1.0,
+//                1.0, 0.0, 0.0, 1.0,
+//                1.0, 0.0, 0.0, 1.0,
+//
+//                0.0, 1.0, 0.0, 1.0,
+//                0.0, 1.0, 0.0, 1.0,
+//                0.0, 1.0, 0.0, 1.0,
+//
+//                0.0, 0.0, 1.0, 1.0,
+//                0.0, 0.0, 1.0, 1.0,
+//                0.0, 0.0, 1.0, 1.0,
+//
+//                1.0, 1.0, 1.0, 1.0,
+//                1.0, 1.0, 1.0, 1.0,
+//                1.0, 1.0, 1.0, 1.0,
+//
+//                1.0, 1.0, 0.0, 1.0,
+//                1.0, 1.0, 0.0, 1.0,
+//                1.0, 1.0, 0.0, 1.0,
+//
+//                0.0, 1.0, 1.0, 1.0,
+//                0.0, 1.0, 1.0, 1.0,
+//                0.0, 1.0, 1.0, 1.0,
+//
+//                0.0, 0.0, 1.0, 1.0,
+//                0.0, 0.0, 1.0, 1.0,
+//                0.0, 0.0, 1.0, 1.0,
+//
+//                1.0, 1.0, 1.0, 1.0,
+//                1.0, 1.0, 1.0, 1.0,
+//                1.0, 1.0, 1.0, 1.0,
+//            ]), GL.STATIC_DRAW);
+//            colorBuffer.item_size = 4;
+//            colorBuffer.number_of_items = 24;
+//            gl.vertexAttribPointer(
+//                    vertexColour_a,
+//                    colorBuffer.item_size,
+//                    GL.FLOAT, false, 0, 0
+//            );
+
+            /**
+             * Draw the specified buffer to the screen.
+             *
+             * @param {WebGLRenderingContext} gl
+             * @param {WebGLBuffer} positionBuffer - with item_size and number_of_items attributes, and also a normalBuffer attribute
+             * @param {string} whichTexture - which texture to use
+             **/
+            function draw(gl, positionBuffer, whichTexture) {
+                // first reload the texture?
+                gl.activeTexture(GL.TEXTURE0);
+                if (whichTexture === "wood") {
+                    gl.bindTexture(GL.TEXTURE_2D, woodImage.textureHandle);
+                } else if (whichTexture === "metal") {
+                    gl.bindTexture(GL.TEXTURE_2D, metalImage.textureHandle);
+                } else if (whichTexture === "floor") {
+                    gl.bindTexture(GL.TEXTURE_2D, floorImage.textureHandle);
+                }
+                // and tell it to use texture 0
+                var sampler_u = gl.getUniformLocation(program, "sampler_u");
+                if (!sampler_u) throw "Couldn't get sampler handle";
+                gl.uniform1i(sampler_u, 0);
+
+                updateMatrices();
+                // use the supplied buffer's normals if possible
+                var normalBuffer = positionBuffer.normalBuffer;
+                // use default random normal buffer if none available
+                if (!normalBuffer) {
+                    var normalBuffer = gl.createBuffer();
+                    gl.bindBuffer(GL.ARRAY_BUFFER, normalBuffer);
+                    gl.bufferData(GL.ARRAY_BUFFER, new Float32Array([
+                        0.0, -1.0, 0.0,
+                        1.0, -1.0, 0.0,
+                        1.0, 0.0, 0.0,
+
+                        0.0, -1.0, 0.0,
+                        1.0, 0.0, 0.0,
+                        0.0, 0.0, 0.0,
+
+                        0.0, 0.0, 0.0,
+                        1.0, 0.0, 0.0,
+                        0.0, 1.0, 0.0,
+
+                        1.0, 0.0, 0.0,
+                        1.0, 1.0, 0.0,
+                        0.0, 1.0, 0.0,
+
+                        0.0, 0.0, 0.0,
+                        1.0, 0.0, 0.0,
+                        0.0, 0.0, 1.0,
+
+                        1.0, 0.0, 0.0,
+                        0.0, 0.0, 1.0,
+                        1.0, 0.0, 1.0,
+
+                        0.0, 0.0, 1.0,
+                        1.0, 0.0, 1.0,
+                        0.0, -1.0, 1.0,
+
+                        1.0, 0.0, 1.0,
+                        1.0, -1.0, 1.0,
+                        0.0, -1.0, 1.0,
+                    ]), GL.STATIC_DRAW);
+                    normalBuffer.item_size = 3;
+                    normalBuffer.number_of_items = 24;
+                }
+                gl.vertexAttribPointer(
+                    vertexNormal_a,
+                    normalBuffer.item_size,
+                    GL.FLOAT, false, 0, 0
+                );
+
+                gl.bindBuffer(GL.ARRAY_BUFFER, positionBuffer);
+                gl.vertexAttribPointer(
+                    vertexPosition_a,
+                    positionBuffer.item_size,
+                    GL.FLOAT, false, 0, 0
+                );
+
+                gl.drawArrays(
+                        GL.TRIANGLES,
+                        0,
+                        positionBuffer.number_of_items
+                );
+
+                // clean up
+                gl.bindBuffer(GL.ARRAY_BUFFER, null);
+                gl.bindTexture(GL.TEXTURE_2D, null);
+            }
+
+            var chairRotation = 0;
+            // call this each time the view changes
+            function drawScene(whiteboardHeight) {
+                // set up the canvas for drawing
+                gl.enable(GL.DEPTH_TEST);
+                gl.clearColor(0.0, 0.0, 0.0, 1.0);  // background colour
+                gl.viewport(0, 0, gl.drawingBufferWidth, gl.drawingBufferHeight);
+                gl.clear(GL.COLOR_BUFFER_BIT | GL.DEPTH_BUFFER_BIT);
+
+                // four sets of two chairs and one table
+                for (var i = 0; i < 2; i++) {
+                    // for each row go a bit forward
+                    var defaultMatrix = mat4.create();
+                    mat4.translate(defaultMatrix, defaultMatrix,
+                        vec3.fromValues(0, 0, -i*5)
+                    );
+                    for (var j = 0; j < 2; j++) {
+                        mat4.translate(defaultMatrix, defaultMatrix,
+                            vec3.fromValues(-j*4, 0, 0)
+                        );
+                        mat4.copy(modelMatrix, defaultMatrix);
+
+                        // left chair
+                        mat4.translate(modelMatrix, modelMatrix,
+                                vec3.fromValues(-1, 0, 0)
+                        );
+                        mat4.rotate(modelMatrix, modelMatrix,
+                            chairRotation,
+                            vec3.fromValues(0.0, 1.0, 0.0)
+                        );
+                        draw(gl, chair(gl), "wood");
+                        mat4.copy(modelMatrix, defaultMatrix);
+
+                        // right chair
+                        mat4.translate(modelMatrix, modelMatrix,
+                                vec3.fromValues(0.5, 0, 0)
+                        );
+                        mat4.rotate(modelMatrix, modelMatrix,
+                                chairRotation,
+                                vec3.fromValues(0.0, 1.0, 0.0)
+                        );
+                        draw(gl, chair(gl), "wood");
+                        mat4.copy(modelMatrix, defaultMatrix);
+
+                        // table
+                        mat4.translate(modelMatrix, modelMatrix,
+                                vec3.fromValues(-.75, 0, 2)
+                        );
+                        draw(gl, table(gl), "metal");
+                        mat4.copy(modelMatrix, defaultMatrix);
+                    }
+                }
+
+                // draw whiteboard
+                resetModelMatrix();
+                mat4.translate(modelMatrix, modelMatrix,
+                    vec3.fromValues(-3.5, -1.0, 5.0)
+                );
+                draw(gl, whiteboard(gl, whiteboardHeight), "metal");
+                mat4.translate(modelMatrix, modelMatrix,
+                    vec3.fromValues(-3.0, 0.0, 2)
+                );
+                mat4.scale(modelMatrix, modelMatrix,
+                    vec3.fromValues(2, 0, 3)
+                )
+                draw(gl, floor(gl), "floor");
+            }
+            drawScene();
+
+            // finally after everything is drawn, register the key press handler
+            document.onkeydown = function(keyboardEvent) {
+                console.log("Pressed: " + keyboardEvent.keyCode);
+                // whiteboard height can be changed by pressing keys 1-9
+                var whiteboardHeight = 3;
+                if (keyboardEvent.keyCode === 81) {
+                    console.log("VIEW 1");
+                    viewOne();
+                } else if (keyboardEvent.keyCode === 87) {
+                    console.log("VIEW 2");
+                    viewTwo();
+                } else if (keyboardEvent.keyCode === 69) {
+                    console.log("VIEW 3");
+                    viewThree();
+                } else if (49 <= keyboardEvent.keyCode && keyboardEvent.keyCode <= 57) {
+                    whiteboardHeight = keyboardEvent.keyCode - 47;
+                } else if (keyboardEvent.keyCode === 79) {
+                    chairRotation -= PI / 4;
+                } else if (keyboardEvent.keyCode === 80) {
+                    chairRotation += PI/4;
+                }
+                drawScene(whiteboardHeight);
+            }
+        }
+
+        /**
+         * Fill a buffer with chair coordinates.
+         *
+         * @param {WebGLRenderingContext} gl - the WebGL context
+         * @returns {WebGLBuffer} - a buffer filled with TRIANGLE coordinates
+         */
+        function chair(gl) {
+            var positionBuffer = gl.createBuffer();
+            gl.bindBuffer(GL.ARRAY_BUFFER, positionBuffer);
+            gl.bufferData(GL.ARRAY_BUFFER, new Float32Array([
+                    // back legs
+                0.0, -1.0,  0.0,
+                1.0, -1.0,  0.0,
+                1.0,  0.0,  0.0,
+
+                0.0, -1.0,  0.0,
+                1.0,  0.0,  0.0,
+                0.0,  0.0,  0.0,
+
+                    // back rest
+                0.0,  0.0,  0.0,
+                1.0,  0.0,  0.0,
+                0.0,  1.0,  0.0,
+
+                1.0,  0.0,  0.0,
+                1.0,  1.0,  0.0,
+                0.0,  1.0,  0.0,
+
+                    // seat
+                0.0,  0.0,  0.0,
+                1.0,  0.0,  0.0,
+                0.0,  0.0,  1.0,
+
+                1.0,  0.0,  0.0,
+                0.0,  0.0,  1.0,
+                1.0,  0.0,  1.0,
+
+                    // front legs
+                0.0,  0.0,  1.0,
+                1.0,  0.0,  1.0,
+                0.0, -1.0,  1.0,
+
+                1.0,  0.0,  1.0,
+                1.0, -1.0,  1.0,
+                0.0, -1.0,  1.0,
+            ]), GL.STATIC_DRAW);
+            positionBuffer.item_size = 3;
+            positionBuffer.number_of_items = 24;
+
+            positionBuffer.normalBuffer = gl.createBuffer();
+            gl.bindBuffer(GL.ARRAY_BUFFER, positionBuffer.normalBuffer);
+            gl.bufferData(GL.ARRAY_BUFFER, new Float32Array([
+                0.0,  0.0,  1.0,
+                0.0,  0.0,  1.0,
+                0.0,  0.0,  1.0,
+
+                0.0,  0.0,  1.0,
+                0.0,  0.0,  1.0,
+                0.0,  0.0,  1.0,
+
+                0.0,  0.0,  1.0,
+                0.0,  0.0,  1.0,
+                0.0,  0.0,  1.0,
+
+                0.0,  0.0,  1.0,
+                0.0,  0.0,  1.0,
+                0.0,  0.0,  1.0,
+
+                0.0,  1.0,  0.0,
+                0.0,  1.0,  0.0,
+                0.0,  1.0,  0.0,
+
+                0.0,  1.0,  0.0,
+                0.0,  1.0,  0.0,
+                0.0,  1.0,  0.0,
+
+                0.0,  0.0,  1.0,
+                0.0,  0.0,  1.0,
+                0.0,  0.0,  1.0,
+
+                0.0,  0.0,  1.0,
+                0.0,  0.0,  1.0,
+                0.0,  0.0,  1.0,
+            ]), GL.STATIC_DRAW);
+            positionBuffer.normalBuffer.item_size = 3;
+            positionBuffer.normalBuffer.number_of_items = 24;
+
+            return positionBuffer;
+        }
+
+        function table(gl) {
+            var positionBuffer = gl.createBuffer();
+            gl.bindBuffer(GL.ARRAY_BUFFER, positionBuffer);
+            gl.bufferData(GL.ARRAY_BUFFER, new Float32Array([
+                // left legs
+                0.0,  0.0,  0.0,
+                0.0, -1.0,  0.0,
+                0.0,  0.0,  1.0,
+
+                0.0,  0.0,  1.0,
+                0.0,  0.0,  2.0,
+                0.0, -1.0,  2.0,
+
+                // surface
+                0.0,  0.0,  0.0,
+                0.0,  0.0,  2.0,
+                2.0,  0.0,  2.0,
+
+                0.0,  0.0,  0.0,
+                2.0,  0.0,  0.0,
+                2.0,  0.0,  2.0,
+
+                // right legs
+                2.0,  0.0,  0.0,
+                2.0, -1.0,  0.0,
+                2.0,  0.0,  1.0,
+
+                2.0,  0.0,  1.0,
+                2.0,  0.0,  2.0,
+                2.0, -1.0,  2.0
+            ]), GL.STATIC_DRAW);
+            positionBuffer.item_size = 3;
+            positionBuffer.number_of_items = 18;
+
+            positionBuffer.normalBuffer = gl.createBuffer();
+            gl.bindBuffer(GL.ARRAY_BUFFER, positionBuffer.normalBuffer);
+            gl.bufferData(GL.ARRAY_BUFFER, new Float32Array([
+                -1.0,  0.0,  0.0,
+                -1.0,  0.0,  0.0,
+                -1.0,  0.0,  0.0,
+
+                -1.0,  0.0,  0.0,
+                -1.0,  0.0,  0.0,
+                -1.0,  0.0,  0.0,
+
+                0.0,  1.0,  0.0,
+                0.0,  1.0,  0.0,
+                0.0,  1.0,  0.0,
+
+                0.0,  1.0,  0.0,
+                0.0,  1.0,  0.0,
+                0.0,  1.0,  0.0,
+
+                1.0,  0.0,  0.0,
+                1.0,  0.0,  0.0,
+                1.0,  0.0,  0.0,
+
+                1.0,  0.0,  0.0,
+                1.0,  0.0,  0.0,
+                1.0,  0.0,  0.0,
+            ]), GL.STATIC_DRAW);
+            positionBuffer.normalBuffer.item_size = 3;
+            positionBuffer.normalBuffer.number_of_items = 24;
+
+            return positionBuffer;
+        }
+
+        /**
+         *
+         * @param gl
+         * @param height - height of the whiteboard
+         * @returns {WebGLBuffer}
+         */
+        function whiteboard(gl, height) {
+            height = height || 3;
+            var positionBuffer = gl.createBuffer();
+            gl.bindBuffer(GL.ARRAY_BUFFER, positionBuffer);
+            gl.bufferData(GL.ARRAY_BUFFER, new Float32Array([
+                0.0, 0.0, 0.0,
+                0.0, 1.0, 0.0,
+                2.0, 1.0, 0.0,
+
+                4.0, 0.0, 0.0,
+                4.0, 1.0, 0.0,
+                2.0, 1.0, 0.0,
+
+                0.0, height, 0.0,
+                0.0, 1.0, 0.0,
+                4.0, 1.0, 0.0,
+
+                0.0, height, 0.0,
+                4.0, 1.0, 0.0,
+                4.0, height, 0.0
+            ]), GL.STATIC_DRAW);
+            positionBuffer.item_size = 3;
+            positionBuffer.number_of_items = 12;
+
+            positionBuffer.normalBuffer = gl.createBuffer();
+            gl.bindBuffer(GL.ARRAY_BUFFER, positionBuffer.normalBuffer);
+            gl.bufferData(GL.ARRAY_BUFFER, new Float32Array([
+                0.0, 0.0, -1.0,
+                0.0, 0.0, -1.0,
+                0.0, 0.0, -1.0,
+                0.0, 0.0, -1.0,
+                0.0, 0.0, -1.0,
+                0.0, 0.0, -1.0,
+                0.0, 0.0, -1.0,
+                0.0, 0.0, -1.0,
+                0.0, 0.0, -1.0,
+                0.0, 0.0, -1.0,
+                0.0, 0.0, -1.0,
+                0.0, 0.0, -1.0,
+            ]), GL.STATIC_DRAW);
+            positionBuffer.normalBuffer.item_size = 3;
+            positionBuffer.normalBuffer.number_of_items = 24;
+
+            return positionBuffer;
+        }
+
+        /**
+         *
+         * @param gl
+         * @returns {WebGLBuffer}
+         */
+        function floor(gl) {
+            var positionBuffer = gl.createBuffer();
+            gl.bindBuffer(GL.ARRAY_BUFFER, positionBuffer);
+            gl.bufferData(GL.ARRAY_BUFFER, new Float32Array([
+                0.0, 0.0, 0.0,
+                0.0, 0.0, -5.0,
+                5.0, 0.0, -5.0,
+
+                0.0, 0.0, 0.0,
+                5.0, 0.0, -5.0,
+                5.0, 0.0, 0.0,
+            ]), GL.STATIC_DRAW);
+            positionBuffer.item_size = 3;
+            positionBuffer.number_of_items = 6;
+
+            positionBuffer.normalBuffer = gl.createBuffer();
+            gl.bindBuffer(GL.ARRAY_BUFFER, positionBuffer.normalBuffer);
+            gl.bufferData(GL.ARRAY_BUFFER, new Float32Array([
+                0.0, 1.0, 0.0,
+                0.0, 1.0, 0.0,
+                0.0, 1.0, 0.0,
+                0.0, 1.0, 0.0,
+                0.0, 1.0, 0.0,
+                0.0, 1.0, 0.0,
+            ]), GL.STATIC_DRAW);
+            positionBuffer.normalBuffer.item_size = 3;
+            positionBuffer.normalBuffer.number_of_items = 24;
+
+            return positionBuffer;
+        }
+    </script>
+</head>
+
+<body onload="main();">
+
+<canvas id="canvas" width="640" height="480">
+    If you can see this text, something is wrong.
+</canvas>
+<p>
+    Press 'q' for view 1, 'w' for view 2, 'e' for view 3.
+</p>
+<p>
+    Press any of the number keys from 1 to 9 to adjust the height of the whiteboard.
+</p>
+<p>
+    Use 'o' and 'p' to rotate the chairs.
+</p>
+<img style="visibility: hidden;" id="wood" src="wood512.jpg"/>
+<img style="visibility: hidden;" id="metal" src="metal512.jpg"/>
+<img style="visibility: hidden;" id="floor" src="floor256.png"/>
+
+</body>
+</html>
